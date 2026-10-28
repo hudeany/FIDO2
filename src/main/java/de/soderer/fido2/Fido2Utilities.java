@@ -66,6 +66,11 @@ public final class Fido2Utilities {
 	 * Loads the native library (if not done yet) and checks whether FIDO2
 	 * tokens can be used at all. Never throws an exception, so it is suitable
 	 * for a startup check.
+	 *
+	 * A failure to load the native library is cached, so later calls return
+	 * the same result without retrying.
+	 *
+	 * @return the availability, never null
 	 */
 	public static Fido2Availability checkAvailability() {
 		LOCK.lock();
@@ -92,6 +97,12 @@ public final class Fido2Utilities {
 		}
 	}
 
+	/**
+	 * Maps an error of loading the native library to an availability result:
+	 * an UnsatisfiedLinkError (library not found) becomes
+	 * {@link Fido2Availability.State#LIBRARY_NOT_FOUND}, everything else
+	 * {@link Fido2Availability.State#LIBRARY_LOAD_ERROR}.
+	 */
 	private static Fido2Availability createLibraryLoadFailure(final LinkageError error) {
 		// Native.load() in the static field initializer of Fido2Native is wrapped in an ExceptionInInitializerError
 		Throwable cause = error;
@@ -115,7 +126,8 @@ public final class Fido2Utilities {
 	 * Windows).
 	 *
 	 * @param includeDetails also collect additional display information
-	 *        (Fido2Token.getDetails()), which may take about a second
+	 *        ({@link Fido2Token#getDetails()}), which may take about a second
+	 * @return the usable tokens, empty if none was found
 	 * @throws Fido2Exception if the native library is not available or the
 	 *         device enumeration failed
 	 */
@@ -152,8 +164,10 @@ public final class Fido2Utilities {
 	/**
 	 * Returns the first usable FIDO2 token.
 	 *
+	 * @return the first entry of {@link #listTokens(boolean)}
 	 * @throws Fido2Exception if no token was found (with an operating system
-	 *         specific hint in its message)
+	 *         specific hint in its message), or if the native library is not
+	 *         available
 	 */
 	public static Fido2Token findToken() {
 		final List<Fido2Token> tokens = listTokens(false);
@@ -183,11 +197,14 @@ public final class Fido2Utilities {
 	 * Creates a new credential with the hmac-secret extension on the token.
 	 * Needs one touch (and the PIN, if the token has one set).
 	 *
+	 * @param token the token to create the credential on
 	 * @param relyingPartyId application identifier, the same value must be
 	 *        used for getHmacSecret()
 	 * @param userName user name stored with the credential
 	 * @param interaction callbacks for PIN and touch prompts, may be null
 	 * @return the credential id, to be stored by the caller
+	 * @throws NullPointerException if token, relyingPartyId or userName is
+	 *         null
 	 * @throws Fido2PinRequiredException if the PIN is needed but was not
 	 *         given, or was rejected
 	 * @throws Fido2Exception on any other error
@@ -210,9 +227,17 @@ public final class Fido2Utilities {
 	 * Retrieves the hmac-secret of a credential for the given salt. The same
 	 * token, credential and salt always give the same secret. Needs one touch.
 	 *
-	 * @param salt HMAC_SALT_LENGTH bytes, see generateSalt()
+	 * @param token the token the credential was created on
+	 * @param relyingPartyId application identifier, the same value as used
+	 *        for {@link #createCredential(Fido2Token, String, String, Fido2Interaction)}
+	 * @param credentialId credential id, as returned by
+	 *        {@link #createCredential(Fido2Token, String, String, Fido2Interaction)}
+	 * @param salt {@link #HMAC_SALT_LENGTH} bytes, see {@link #generateSalt()}
 	 * @param interaction callbacks for PIN and touch prompts, may be null
 	 * @return the 32 byte hmac-secret
+	 * @throws NullPointerException if token or relyingPartyId is null
+	 * @throws IllegalArgumentException if the credential id is null or empty,
+	 *         or the salt does not have {@link #HMAC_SALT_LENGTH} bytes
 	 * @throws Fido2NoMatchingCredentialException if the credential does not belong to the token
 	 * @throws Fido2PinRequiredException if the PIN is needed but was not
 	 *         given, or was rejected
@@ -232,9 +257,18 @@ public final class Fido2Utilities {
 	 * accessed tokens are tried credential by credential, with the Windows
 	 * WebAuthn API the matching credential is determined first (one
 	 * additional touch), since every non-matching attempt would show a
-	 * Windows error dialog. Fido2Interaction.onCredentialAttempt() is called
-	 * before each attempt.
+	 * Windows error dialog. {@link Fido2Interaction#onCredentialAttempt(int, int)}
+	 * is called before each attempt.
 	 *
+	 * @param token the connected token
+	 * @param relyingPartyId application identifier, the same value as used
+	 *        for {@link #createCredential(Fido2Token, String, String, Fido2Interaction)}
+	 * @param candidates the candidate credentials (with their salts), at
+	 *        least one
+	 * @param interaction callbacks for PIN and touch prompts, may be null
+	 * @return the hmac-secret and the index of the matching candidate
+	 * @throws NullPointerException if token or relyingPartyId is null
+	 * @throws IllegalArgumentException if candidates is null or empty
 	 * @throws Fido2NoMatchingCredentialException if no candidate belongs to the token
 	 * @throws Fido2PinRequiredException if the PIN is needed but was not
 	 *         given, or was rejected
@@ -290,13 +324,23 @@ public final class Fido2Utilities {
 		}
 	}
 
-	/** Creates a random salt for the hmac-secret extension */
+	/**
+	 * Creates a random salt for the hmac-secret extension, using a
+	 * {@link SecureRandom}.
+	 *
+	 * @return a new array of {@link #HMAC_SALT_LENGTH} random bytes
+	 */
 	public static byte[] generateSalt() {
 		final byte[] salt = new byte[HMAC_SALT_LENGTH];
 		SECURE_RANDOM.nextBytes(salt);
 		return salt;
 	}
 
+	/**
+	 * Loads the native library if not done yet.
+	 *
+	 * @throws Fido2Exception if the native library is not available
+	 */
 	private static void ensureLibraryAvailable() {
 		if (libraryLoadFailure != null) {
 			throw new Fido2Exception("The native libfido2 library is not available: " + libraryLoadFailure.getDetail());

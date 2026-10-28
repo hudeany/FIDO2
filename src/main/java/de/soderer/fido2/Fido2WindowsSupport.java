@@ -39,6 +39,12 @@ final class Fido2WindowsSupport {
 		// Utility class
 	}
 
+	/**
+	 * Tells whether the JVM runs on Windows (determined once from the
+	 * "os.name" system property).
+	 *
+	 * @return true on Windows
+	 */
 	static boolean isWindows() {
 		return IS_WINDOWS;
 	}
@@ -106,6 +112,9 @@ final class Fido2WindowsSupport {
 	 *
 	 * Always true on non-Windows systems. Uses "net session", which only
 	 * succeeds with elevated rights, to avoid a jna-platform dependency.
+	 * The result is cached for the lifetime of the process.
+	 *
+	 * @return true if running elevated, or not on Windows
 	 */
 	static boolean isRunningAsAdministrator() {
 		if (!IS_WINDOWS) {
@@ -209,11 +218,14 @@ final class Fido2WindowsSupport {
 
 	/**
 	 * The serial number of a USB device is the last part of its Windows
-	 * device instance id (e.g. "USB\\VID_0483&PID_A2CA\\205D329D304B"). For
+	 * device instance id (e.g. {@code USB\VID_0483&PID_A2CA\205D329D304B}). For
 	 * devices without serial number Windows generates this part, it then
-	 * contains a "&" and is no serial number.
+	 * contains a "&amp;" and is no serial number.
 	 *
-	 * @return serial number, or null if the device has none
+	 * @param usbInstanceId Windows device instance id of the USB device, may
+	 *        be null
+	 * @return serial number, or null if the device has none (or the id is no
+	 *         USB device instance id)
 	 */
 	static String getUsbSerialNumber(final String usbInstanceId) {
 		if (usbInstanceId == null || !usbInstanceId.toUpperCase(Locale.ROOT).startsWith("USB\\")) {

@@ -11,10 +11,10 @@ import java.util.function.Supplier;
  * operation (typically a background thread), so GUI implementations must
  * marshal to their UI thread themselves.
  *
- * Operating system specifics are handled by Fido2Utilities: e.g. when the
- * operating system shows its own dialogs for touch and PIN (Windows WebAuthn
- * API), onTouchRequired()/onTouchCompleted() and requestPin() are simply not
- * called.
+ * Operating system specifics are handled by {@link Fido2Utilities}: e.g.
+ * when the operating system shows its own dialogs for touch and PIN (Windows
+ * WebAuthn API), {@link #onTouchRequired()}/{@link #onTouchCompleted()} and
+ * {@link #requestPin()} are simply not called.
  */
 public interface Fido2Interaction {
 	/** Interaction without any callbacks (no PIN available, no touch notification) */
@@ -27,7 +27,7 @@ public interface Fido2Interaction {
 	 * operation, at most once per token operation.
 	 *
 	 * @return the PIN, or null if none is available (e.g. user cancelled),
-	 *         which ends the operation with a Fido2PinRequiredException
+	 *         which ends the operation with a {@link Fido2PinRequiredException}
 	 */
 	default String requestPin() {
 		return null;
@@ -45,7 +45,8 @@ public interface Fido2Interaction {
 
 	/**
 	 * Called before a credential of a list of candidate credentials is tried
-	 * (see Fido2Utilities.getHmacSecret(Fido2Token, String, List, Fido2Interaction)).
+	 * (see
+	 * {@link Fido2Utilities#getHmacSecret(Fido2Token, String, java.util.List, Fido2Interaction)}).
 	 *
 	 * @param credentialNumber 1-based number of the credential tried now
 	 * @param credentialCount number of candidate credentials
@@ -56,6 +57,16 @@ public interface Fido2Interaction {
 
 	/**
 	 * Creates an interaction from single callbacks, each of them may be null.
+	 *
+	 * @param pinSupplier supplies the PIN for {@link #requestPin()}; null
+	 *        means no PIN is available
+	 * @param onTouchRequired called for {@link #onTouchRequired()}, may be null
+	 * @param onTouchCompleted called for {@link #onTouchCompleted()}, may be
+	 *        null
+	 * @param onCredentialAttempt called with credentialNumber and
+	 *        credentialCount for
+	 *        {@link #onCredentialAttempt(int, int)}, may be null
+	 * @return a new interaction delegating to the given callbacks
 	 */
 	static Fido2Interaction of(final Supplier<String> pinSupplier, final Runnable onTouchRequired, final Runnable onTouchCompleted, final BiConsumer<Integer, Integer> onCredentialAttempt) {
 		return new Fido2Interaction() {

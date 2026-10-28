@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<project default="build_jar" name="Build library FIDO2">
+<project default="build_jar" name="Build library soderer-fido2">
 	<!-- ===== Project specific part ===== -->
 
 	<!-- Artifact name used for the jar file names and the Maven artifactId -->
-	<property name="artifactId" value="fido2" />
+	<property name="artifactId" value="soderer-fido2" />
 	
-	<property name="coverageMinimumLineRatio" value="0" />
-	<property name="coverageMinimumBranchRatio" value="0" />
+	<property name="coverageMinimumLineRatio" value="0.40" />
+	<property name="coverageMinimumBranchRatio" value="0.30" />
 
 	<!-- JNA version -->
 	<property name="jna.version" value="5.19.1" />

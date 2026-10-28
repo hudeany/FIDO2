@@ -65,16 +65,33 @@ final class LibFido2 {
 
 	/** A device as reported by fido_dev_info_manifest() */
 	static final class DeviceEntry {
+		/** Device path for fido_dev_open() */
 		final String path;
+		/** Manufacturer, may be null or empty */
 		final String manufacturer;
+		/** Product name, may be null or empty */
 		final String product;
 
+		/**
+		 * Creates a new device entry.
+		 *
+		 * @param path device path for fido_dev_open()
+		 * @param manufacturer manufacturer, may be null or empty
+		 * @param product product name, may be null or empty
+		 */
 		DeviceEntry(final String path, final String manufacturer, final String product) {
 			this.path = path;
 			this.manufacturer = manufacturer;
 			this.product = product;
 		}
 
+		/**
+		 * Builds a human readable name: "manufacturer product", only the
+		 * product if there is no manufacturer, or the path if there is no
+		 * product.
+		 *
+		 * @return the display name
+		 */
 		String getDisplayName() {
 			if (product != null && !product.isBlank()) {
 				return manufacturer != null && !manufacturer.isBlank() ? manufacturer + " " + product : product;
@@ -138,6 +155,10 @@ final class LibFido2 {
 	/**
 	 * Lists the devices reported by libfido2, including the Windows WebAuthn
 	 * pseudo-device (WINDOWS_WEBAUTHN_PATH) on Windows.
+	 *
+	 * @param maxDevices maximum number of devices to report
+	 * @return the devices, empty if none is connected
+	 * @throws Fido2Exception if the enumeration failed
 	 */
 	static List<DeviceEntry> listDevices(final int maxDevices) {
 		ensureInitialized();
@@ -179,6 +200,8 @@ final class LibFido2 {
 	 * Checks whether the Windows WebAuthn API can be opened. Requires no user
 	 * interaction, fido_dev_is_winhello() only reads a flag set by
 	 * fido_dev_open(). Always false on other systems.
+	 *
+	 * @return true if the Windows WebAuthn API is usable
 	 */
 	static boolean isWindowsWebAuthnAvailable() {
 		if (!Fido2WindowsSupport.isWindows()) {
@@ -204,6 +227,10 @@ final class LibFido2 {
 	 * Creates a new credential with the hmac-secret extension enabled
 	 * ("fido2-cred -M / -V" in the shell script).
 	 *
+	 * @param path device path
+	 * @param relyingPartyId relying party id
+	 * @param userName user name stored with the credential
+	 * @param interaction callbacks for PIN and touch prompts, not null
 	 * @return credential id
 	 * @throws Fido2PinRequiredException if a PIN is needed but none was
 	 *         given by the interaction, or the given PIN was rejected
@@ -298,6 +325,11 @@ final class LibFido2 {
 	 * Retrieves the hmac-secret of an existing credential for the given salt
 	 * ("fido2-assert -G" in the shell script).
 	 *
+	 * @param path device path
+	 * @param relyingPartyId relying party id used for the credential creation
+	 * @param credentialId credential id
+	 * @param salt salt for the hmac-secret extension
+	 * @param interaction callbacks for PIN and touch prompts, not null
 	 * @param expectedTokenName optional name of the token the credential was
 	 *        created on, only for the error message; may be null
 	 * @return the 32 byte hmac-secret
@@ -388,6 +420,10 @@ final class LibFido2 {
 	 * token, with a single assertion allowing all of them (the token picks
 	 * its own credential).
 	 *
+	 * @param path device path
+	 * @param relyingPartyId relying party id used for the credential creation
+	 * @param credentialIds candidate credential ids
+	 * @param interaction callbacks for touch prompts, not null
 	 * @return index of the matching credential in credentialIds
 	 * @throws Fido2NoMatchingCredentialException if no credential matches the token
 	 */
@@ -526,6 +562,8 @@ final class LibFido2 {
 	 * its hash. It does not influence the hmac-secret.
 	 *
 	 * @param type "webauthn.create" or "webauthn.get"
+	 * @param origin origin (the relying party id), JSON-escaped here
+	 * @return the UTF-8 encoded client data JSON
 	 */
 	private static byte[] createClientData(final String type, final String origin) {
 		final String challenge = Base64.getUrlEncoder().withoutPadding().encodeToString(randomBytes(32));
