@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<project default="build_jar" name="Build library FIDO2">
+	<!-- ===== Project specific part ===== -->
+
+	<!-- Artifact name used for the jar file names and the Maven artifactId -->
+	<property name="artifactId" value="fido2" />
+	
+	<property name="coverageMinimumLineRatio" value="0" />
+	<property name="coverageMinimumBranchRatio" value="0" />
+
+	<!-- JNA version -->
+	<property name="jna.version" value="5.19.1" />
+
+	<!-- Maven POM dependencies: "groupId:artifactId:version[:optional]" -->
+	<property name="mavenDependency.jna" value="net.java.dev.jna:jna:${jna.version}" />
+
+	<!-- Runtime libraries of this project go to "lib/" (may stay empty) -->
+	<target name="download_dependencies">
+		<mkdir dir="lib/" />
+		<delete includeEmptyDirs="true">
+			<fileset dir="lib/">
+				<include name="*" />
+			</fileset>
+		</delete>
+		
+		<get src="https://repo1.maven.org/maven2/net/java/dev/jna/jna/${jna.version}/jna-${jna.version}.jar" dest="lib/" />
+	</target>
+
+	<!-- ===== Common part: identical in all library build files, do not change per project ===== -->
+
+	<echo message="Java Version: ${java.version}" />
+	<echo message="Ant Version: ${ant.version}" />
+
+	<!-- Strip line breaks so a trailing newline in build.version does not end up in file names -->
+	<loadfile property="version" srcFile="build.version" failonerror="false">
+		<filterchain>
+			<striplinebreaks />
+		</filterchain>
+	</loadfile>
+	<property name="version" value="noVersion" />
+
+	<echo message="artifactId: ${artifactId}" />
+	<echo message="version (build.version): ${version}" />
+
+	<property name="buildPath" value="build" />
+	<echo message="buildPath: ${buildPath}" />
+
+	<!-- Code coverage report (JaCoCo), kept after the build -->
+	<property name="coveragePath" value="${buildPath}/coverage" />
+	<!-- Only used if not already set in the project specific part -->
+	<property name="coverageMinimumLineRatio" value="0.80" />
+	<property name="coverageMinimumBranchRatio" value="0.80" />
+
+	<!-- Runtime libraries; an empty or missing "lib/" directory is fine -->
+	<path id="runtime.libs">
+		<fileset dir="lib" erroronmissingdir="false">
+			<include name="*.jar" />
+		</fileset>
+	</path>
+
+	<!-- Test libraries, same for all libraries -->
+	<target name="download_test_dependencies">
+		<mkdir dir="lib_test/" />
+		<delete includeEmptyDirs="true">
+			<fileset dir="lib_test/">
+				<include name="*" />
+			</fileset>
+		</delete>
+
+		<property name="hamcrest.version" value="3.0" />
+		<property name="junit.version" value="6.1.3" />
+		<property name="opentest4j.version" value="1.3.0" />
+		<property name="apiguardian.version" value="1.1.2" />
+
+		<get src="https://repo1.maven.org/maven2/org/hamcrest/hamcrest/${hamcrest.version}/hamcrest-${hamcrest.version}.jar" dest="lib_test/" />
+		<get src="https://repo1.maven.org/maven2/org/junit/jupiter/junit-jupiter-api/${junit.version}/junit-jupiter-api-${junit.version}.jar" dest="lib_test/" />
+		<get src="https://repo1.maven.org/maven2/org/junit/jupiter/junit-jupiter-engine/${junit.version}/junit-jupiter-engine-${junit.version}.jar" dest="lib_test/" />
+		<get src="https://repo1.maven.org/maven2/org/junit/jupiter/junit-jupiter-params/${junit.version}/junit-jupiter-params-${junit.version}.jar" dest="lib_test/" />
+		<get src="https://repo1.maven.org/maven2/org/junit/platform/junit-platform-launcher/${junit.version}/junit-platform-launcher-${junit.version}.jar" dest="lib_test/" />
+		<get src="https://repo1.maven.org/maven2/org/junit/platform/junit-platform-engine/${junit.version}/junit-platform-engine-${junit.version}.jar" dest="lib_test/" />
+		<get src="https://repo1.maven.org/maven2/org/junit/platform/junit-platform-commons/${junit.version}/junit-platform-commons-${junit.version}.jar" dest="lib_test/" />
+		<get src="https://repo1.maven.org/maven2/org/opentest4j/opentest4j/${opentest4j.version}/opentest4j-${opentest4j.version}.jar" dest="lib_test/" />
+		<get src="https://repo1.maven.org/maven2/org/apiguardian/apiguardian-api/${apiguardian.version}/apiguardian-api-${apiguardian.version}.jar" dest="lib_test/" />
+
+		<!-- JaCoCo Ant tasks including the agent. Separate directory, so it is not part of the test classpath -->
+		<property name="jacoco.version" value="0.8.15" />
+		<mkdir dir="lib_coverage/" />
+		<delete includeEmptyDirs="true">
+			<fileset dir="lib_coverage/">
+				<include name="*" />
+			</fileset>
+		</delete>
+		<get src="https://repo1.maven.org/maven2/org/jacoco/org.jacoco.ant/${jacoco.version}/org.jacoco.ant-${jacoco.version}-nodeps.jar" dest="lib_coverage/jacocoant.jar" />
+	</target>
+
+	<target name="build_jar" depends="cleanup_before, create_jar, test, create_javadoc, cleanup_after" />
+
+	<target name="cleanup_before">
+		<mkdir dir="${buildPath}" />
+
+		<delete includeEmptyDirs="true">
+			<fileset dir="${buildPath}">
+				<include name="*" />
+			</fileset>
+		</delete>
+
+		<delete dir="${buildPath}/bin" />
+		<mkdir dir="${buildPath}/bin" />
+
+		<delete dir="${buildPath}/testbin" />
+		<mkdir dir="${buildPath}/testbin" />
+
+		<delete dir="${coveragePath}" />
+	</target>
+
+	<target name="create_jar" depends="cleanup_before, download_dependencies">
+		<javac release="17" srcdir="src/main/java" destdir="${buildPath}/bin" includeantruntime="false" encoding="UTF-8" debug="true" deprecation="false" nowarn="true">
+			<classpath refid="runtime.libs" />
+			<compilerarg value="-Xlint:unchecked" />
+			<compilerarg value="-parameters" />
+		</javac>
+
+		<copy todir="${buildPath}/bin">
+			<fileset dir="src/main/resources" erroronmissingdir="false" />
+		</copy>
+
+		<jar destfile="${buildPath}/${artifactId}-${version}.jar">
+			<manifest>
+				<attribute name="Version" value="${version}" />
+			</manifest>
+
+			<fileset dir="${buildPath}/bin" />
+			<fileset dir="" includes="LICENSE.txt" />
+		</jar>
+
+		<jar destfile="${buildPath}/${artifactId}-${version}-sources.jar">
+			<manifest>
+				<attribute name="Version" value="${version}" />
+			</manifest>
+
+			<fileset dir="src/main/java" includes="**/*.java" />
+			<fileset dir="" includes="LICENSE.txt" />
+		</jar>
+	</target>
+
+	<target name="test" depends="create_jar, download_test_dependencies" xmlns:jacoco="antlib:org.jacoco.ant">
+		<path id="test.classpath">
+			<fileset dir="lib_test">
+				<include name="*.jar" />
+			</fileset>
+			<path refid="runtime.libs" />
+			<pathelement location="${buildPath}/${artifactId}-${version}.jar" />
+			<pathelement location="${buildPath}/testbin" />
+		</path>
+
+		<javac release="17" srcdir="src/test/java" destdir="${buildPath}/testbin" includeantruntime="false" encoding="UTF-8" debug="true" failonerror="true">
+			<classpath refid="test.classpath" />
+			<include name="**/*.java" />
+		</javac>
+
+		<copy todir="${buildPath}/testbin">
+			<fileset dir="src/test/resources" erroronmissingdir="false" />
+		</copy>
+
+		<taskdef uri="antlib:org.jacoco.ant" resource="org/jacoco/ant/antlib.xml">
+			<classpath path="lib_coverage/jacocoant.jar" />
+		</taskdef>
+
+		<!-- Sets the -javaagent argument for the forked test JVM, which records the coverage data -->
+		<jacoco:agent property="jacocoAgentArgument" destfile="${buildPath}/jacoco.exec" append="false" />
+
+		<junitlauncher printSummary="true" failureProperty="test.failed">
+			<classpath refid="test.classpath" />
+			<testclasses outputdir="${buildPath}">
+				<fileset dir="${buildPath}/testbin">
+					<include name="**/*.class" />
+				</fileset>
+				<!-- The coverage agent needs a JVM of its own -->
+				<fork dir="${basedir}">
+					<jvmarg value="${jacocoAgentArgument}" />
+				</fork>
+				<!-- Writes a report per test class to TEST-*.txt, including details of failed tests -->
+				<listener type="legacy-brief" sendSysOut="false" sendSysErr="false" />
+			</testclasses>
+		</junitlauncher>
+
+		<!-- Created also when tests failed, minimum coverage is checked after the test result -->
+		<jacoco:report>
+			<executiondata>
+				<file file="${buildPath}/jacoco.exec" />
+			</executiondata>
+			<structure name="${artifactId}">
+				<!-- Library classes only, the test classes are not measured -->
+				<classfiles>
+					<fileset dir="${buildPath}/bin" includes="**/*.class" />
+				</classfiles>
+				<sourcefiles encoding="UTF-8">
+					<fileset dir="src/main/java" />
+				</sourcefiles>
+			</structure>
+			<html destdir="${coveragePath}" />
+			<xml destfile="${coveragePath}/jacoco.xml" />
+			<csv destfile="${coveragePath}/jacoco.csv" />
+			<check failonviolation="false" violationsproperty="coverage.violations">
+				<rule element="BUNDLE">
+					<limit counter="LINE" value="COVEREDRATIO" minimum="${coverageMinimumLineRatio}" />
+					<limit counter="BRANCH" value="COVEREDRATIO" minimum="${coverageMinimumBranchRatio}" />
+				</rule>
+			</check>
+		</jacoco:report>
+		<echo message="Coverage report: ${coveragePath}/index.html" />
+
+		<!-- Show which tests failed and why before stopping the build (only reports with failures or errors) -->
+		<concat if:set="test.failed" xmlns:if="ant:if">
+			<fileset dir="${buildPath}" includes="TEST-*.txt">
+				<or>
+					<contains text="FAILED" />
+					<contains text="Caused an ERROR" />
+				</or>
+			</fileset>
+		</concat>
+		<fail if="test.failed" message="Tests failed!" />
+		<fail if="coverage.violations" message="Code coverage below minimum: ${coverage.violations}" />
+	</target>
+
+	<target name="create_javadoc" depends="create_jar">
+		<delete dir="${buildPath}/javadoc" />
+		<mkdir dir="${buildPath}/javadoc" />
+
+		<!-- doclint disabled so missing javadoc comments do not break the build -->
+		<javadoc destdir="${buildPath}/javadoc" encoding="UTF-8" charset="UTF-8" docencoding="UTF-8" source="17" failonerror="true">
+			<classpath refid="runtime.libs" />
+			<arg value="-quiet" />
+			<fileset dir="src/main/java" includes="**/*.java" />
+		</javadoc>
+
+		<jar destfile="${buildPath}/${artifactId}-${version}-javadoc.jar">
+			<manifest>
+				<attribute name="Version" value="${version}" />
+			</manifest>
+
+			<fileset dir="${buildPath}/javadoc" />
+			<fileset dir="" includes="LICENSE.txt" />
+		</jar>
+
+		<delete dir="${buildPath}/javadoc" />
+	</target>
+
+	<target name="cleanup_after" depends="test, create_javadoc">
+		<delete dir="${buildPath}/bin" />
+		<delete dir="${buildPath}/testbin" />
+
+		<delete includeEmptyDirs="true">
+			<fileset dir="${buildPath}">
+				<include name="TEST-*" />
+				<include name="jacoco.exec" />
+			</fileset>
+		</delete>
+	</target>
+</project>
