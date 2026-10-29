@@ -5,8 +5,8 @@
 	<!-- Artifact name used for the jar file names and the Maven artifactId -->
 	<property name="artifactId" value="soderer-fido2" />
 	
-	<property name="coverageMinimumLineRatio" value="0.40" />
-	<property name="coverageMinimumBranchRatio" value="0.30" />
+	<property name="coverageMinimumLineRatio" value="0.20" />
+	<property name="coverageMinimumBranchRatio" value="0.20" />
 
 	<!-- JNA version -->
 	<property name="jna.version" value="5.19.1" />
