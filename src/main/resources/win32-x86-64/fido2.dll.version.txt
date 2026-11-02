@@ -1,0 +1,31 @@
+libfido2 1.17.0 by Yubico AB
+
+FileVersionRaw     : 1.17.0.0
+ProductVersionRaw  : 1.17.0.0
+Comments           :
+CompanyName        : Yubico AB
+FileBuildPart      : 0
+FileDescription    : libfido2 - FIDO2 Library
+FileMajorPart      : 1
+FileMinorPart      : 17
+FileName           : win32-x86-64\fido2.dll
+FilePrivatePart    : 0
+FileVersion        : 1.17.0
+InternalName       : fido2.dll
+IsDebug            : False
+IsPatched          : False
+IsPrivateBuild     : False
+IsPreRelease       : False
+IsSpecialBuild     : False
+Language           : Englisch (Vereinigte Staaten)
+LegalCopyright     : Copyright (c) 2018-2026 Yubico AB. All rights reserved.
+LegalTrademarks    :
+OriginalFilename   : fido2.dll
+PrivateBuild       :
+ProductBuildPart   : 0
+ProductMajorPart   : 1
+ProductMinorPart   : 17
+ProductName        : libfido2
+ProductPrivatePart : 0
+ProductVersion     : 1.17.0
+SpecialBuild       :
