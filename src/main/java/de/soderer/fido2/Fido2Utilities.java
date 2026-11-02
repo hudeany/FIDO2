@@ -72,7 +72,9 @@ import java.util.regex.Pattern;
  * {@link #verifyAssertion(Fido2Assertion, byte[], String, byte[], Fido2VerificationMode) verifyAssertion()}
  * checks the signature in pure Java (no token or native library needed).
  * Unlike the hmac-secret, signatures with user presence only also work via
- * the Windows WebAuthn API.
+ * the Windows WebAuthn API. A credential for both purposes (hmac-secret and
+ * signatures) is created by
+ * {@link #createCredentialWithPublicKey(Fido2Token, String, String, Fido2Interaction, Fido2VerificationMode) createCredentialWithPublicKey()}.
  */
 public final class Fido2Utilities {
 	/** Length of the salt for the hmac-secret extension */
@@ -299,6 +301,53 @@ public final class Fido2Utilities {
 		try {
 			ensureLibraryAvailable();
 			return LibFido2.makeCredential(token.getId(), relyingPartyId, userName, nonNull(interaction), verificationMode);
+		} finally {
+			LOCK.unlock();
+		}
+	}
+
+	/**
+	 * Creates a new credential with the hmac-secret extension on the token,
+	 * like {@link #createCredential(Fido2Token, String, String, Fido2Interaction, Fido2VerificationMode)},
+	 * but additionally returns its public key (ECDSA P-256). Needs one touch,
+	 * and the PIN if the token has one set or user verification is requested.
+	 *
+	 * The public key is only available at creation time. With it, the same
+	 * credential can be used for both the hmac-secret and signatures:
+	 * {@link #authenticate(Fido2Token, String, List, byte[], Fido2Interaction, Fido2VerificationMode)}
+	 * and {@link #verifyAssertion(Fido2Assertion, byte[], String, byte[], Fido2VerificationMode)}
+	 * accept its credential id and public key like those of
+	 * {@link #register(Fido2Token, String, String, Fido2Interaction, Fido2VerificationMode)}.
+	 *
+	 * @param token the token to create the credential on
+	 * @param relyingPartyId application identifier, the same value must be
+	 *        used for getHmacSecret(), authenticate() and verifyAssertion()
+	 * @param userName user name stored with the credential
+	 * @param interaction callbacks for PIN and touch prompts, may be null
+	 * @param verificationMode USER_PRESENCE or USER_VERIFICATION; only
+	 *        decides whether the PIN is required for the creation itself
+	 * @return the credential id and public key (X.509 SubjectPublicKeyInfo,
+	 *         DER), to be stored by the caller
+	 * @throws NullPointerException if token, relyingPartyId, userName or
+	 *         verificationMode is null
+	 * @throws Fido2PinRequiredException if the PIN is needed but was not
+	 *         given, or was rejected
+	 * @throws Fido2VerificationModeException if user verification is
+	 *         requested for a token without PIN
+	 * @throws Fido2Exception on any other error
+	 */
+	public static Fido2Registration createCredentialWithPublicKey(final Fido2Token token, final String relyingPartyId, final String userName, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
+		Objects.requireNonNull(token, "token");
+		Objects.requireNonNull(relyingPartyId, "relyingPartyId");
+		Objects.requireNonNull(userName, "userName");
+		Objects.requireNonNull(verificationMode, "verificationMode");
+
+		LOCK.lock();
+		try {
+			ensureLibraryAvailable();
+			// Last parameter: create the credential with the hmac-secret extension
+			final LibFido2.CreatedCredential createdCredential = LibFido2.createCredential(token.getId(), relyingPartyId, userName, nonNull(interaction), verificationMode, true);
+			return new Fido2Registration(createdCredential.credentialId(), encodeEs256PublicKey(createdCredential.rawPublicKey()));
 		} finally {
 			LOCK.unlock();
 		}
