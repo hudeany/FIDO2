@@ -1,10 +1,22 @@
 package de.soderer.fido2;
 
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.KeyFactory;
+import java.security.MessageDigest;
+import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.security.Signature;
+import java.security.interfaces.ECPublicKey;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Operating system independent access to FIDO2 hardware tokens with the
@@ -19,11 +31,11 @@ import java.util.concurrent.locks.ReentrantLock;
  * they are accessed directly.</li>
  * <li>Windows WebAuthn API: no own touch prompts and PIN requests (the
  * Fido2Interaction callbacks are not called), no discoverable credentials,
- * user verification set explicitly according to the
- * {@link Fido2VerificationMode} (so the hmac-secret is the same as with
- * direct access in the same mode), the matching credential of several
- * candidates is determined in a single step (otherwise Windows would show an
- * error dialog per non-matching one).</li>
+ * the matching credential of several candidates is determined in a single
+ * step (otherwise Windows would show an error dialog per non-matching one).
+ * Windows always enforces user verification for the hmac-secret extension,
+ * so only {@link Fido2VerificationMode#USER_VERIFICATION} is supported there
+ * (see {@link #isUserPresenceOnlySupported(Fido2Token)}).</li>
  * <li>Linux/macOS: direct HID access via the system libfido2.</li>
  * </ul>
  *
@@ -32,7 +44,10 @@ import java.util.concurrent.locks.ReentrantLock;
  * with {@link Fido2VerificationMode#USER_VERIFICATION} the token's PIN is
  * always required. The token derives different hmac-secrets in both modes, so
  * the caller must store the mode with the credential and use the same mode
- * for every later call.
+ * for every later call. After every assertion the user verification flag
+ * reported by the token is checked against the requested mode, so a secret
+ * is never returned for a different mode than requested
+ * ({@link Fido2VerificationModeException} otherwise).
  *
  * All token operations are serialized (libfido2 device handles are not
  * thread-safe), so they may be called from any thread. Token operations block
@@ -48,10 +63,39 @@ import java.util.concurrent.locks.ReentrantLock;
  * final byte[] salt = Fido2Utilities.generateSalt();
  * final byte[] secret = Fido2Utilities.getHmacSecret(token, "MyApp", credentialId, salt, interaction);
  * </pre>
+ *
+ * Besides the hmac-secret (a stable secret key), tokens can be used for
+ * signatures like a WebAuthn login: {@link #register(Fido2Token, String, String, Fido2Interaction, Fido2VerificationMode) register()}
+ * creates a credential and returns its public key,
+ * {@link #authenticate(Fido2Token, String, List, byte[], Fido2Interaction, Fido2VerificationMode) authenticate()}
+ * lets the token sign a challenge, and
+ * {@link #verifyAssertion(Fido2Assertion, byte[], String, byte[], Fido2VerificationMode) verifyAssertion()}
+ * checks the signature in pure Java (no token or native library needed).
+ * Unlike the hmac-secret, signatures with user presence only also work via
+ * the Windows WebAuthn API.
  */
 public final class Fido2Utilities {
 	/** Length of the salt for the hmac-secret extension */
 	public static final int HMAC_SALT_LENGTH = 32;
+
+	/** Length of the challenges created by {@link #generateChallenge()} */
+	public static final int CHALLENGE_LENGTH = 32;
+
+	/** Minimum length of a challenge for {@link #authenticate(Fido2Token, String, List, byte[], Fido2Interaction, Fido2VerificationMode)} */
+	public static final int MIN_CHALLENGE_LENGTH = 16;
+
+	/**
+	 * DER prefix of an X.509 SubjectPublicKeyInfo for an uncompressed P-256
+	 * point: SEQUENCE { SEQUENCE { OID ecPublicKey, OID prime256v1 },
+	 * BIT STRING { 0x04 || x || y } }. Followed by the 64 bytes x || y.
+	 */
+	private static final byte[] ES256_SUBJECT_PUBLIC_KEY_INFO_PREFIX = {
+			0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, (byte) 0x86, 0x48, (byte) 0xCE, 0x3D, 0x02, 0x01,
+			0x06, 0x08, 0x2A, (byte) 0x86, 0x48, (byte) 0xCE, 0x3D, 0x03, 0x01, 0x07,
+			0x03, 0x42, 0x00, 0x04 };
+
+	/** The client data type of an assertion (WebAuthn) */
+	private static final String CLIENT_DATA_TYPE_GET = "webauthn.get";
 
 	/** Maximum number of devices to probe */
 	private static final int MAX_DEVICES = 16;
@@ -306,6 +350,9 @@ public final class Fido2Utilities {
 	 * @throws Fido2NoMatchingCredentialException if the credential does not belong to the token
 	 * @throws Fido2PinRequiredException if the PIN is needed but was not
 	 *         given, or was rejected
+	 * @throws Fido2VerificationModeException if the secret cannot be
+	 *         retrieved in the requested mode with this token, see
+	 *         {@link #isUserPresenceOnlySupported(Fido2Token)}
 	 * @throws Fido2Exception on any other error
 	 */
 	public static byte[] getHmacSecret(final Fido2Token token, final String relyingPartyId, final byte[] credentialId, final byte[] salt, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
@@ -372,6 +419,9 @@ public final class Fido2Utilities {
 	 * @throws Fido2NoMatchingCredentialException if no candidate belongs to the token
 	 * @throws Fido2PinRequiredException if the PIN is needed but was not
 	 *         given, or was rejected
+	 * @throws Fido2VerificationModeException if the secret cannot be
+	 *         retrieved in the requested mode with this token, see
+	 *         {@link #isUserPresenceOnlySupported(Fido2Token)}
 	 * @throws Fido2Exception on any other error
 	 */
 	public static Fido2HmacSecret getHmacSecret(final Fido2Token token, final String relyingPartyId, final List<Fido2Credential> candidates, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
@@ -382,6 +432,12 @@ public final class Fido2Utilities {
 			throw new IllegalArgumentException("No candidate credentials given");
 		}
 		final Fido2Interaction checkedInteraction = nonNull(interaction);
+		if (verificationMode == Fido2VerificationMode.USER_PRESENCE && !isUserPresenceOnlySupported(token)) {
+			// Checked before any token access, Windows would otherwise force the user to create or enter a PIN first
+			throw new Fido2VerificationModeException("Retrieving the HMAC secret with user presence only (touch, no PIN) is not possible via the Windows WebAuthn API, "
+					+ "since Windows always enforces user verification (PIN) for it. Run the application with administrator rights for direct token access, "
+					+ "or use user verification.");
+		}
 
 		LOCK.lock();
 		try {
@@ -410,6 +466,9 @@ public final class Fido2Utilities {
 				} catch (final Fido2PinRequiredException e) {
 					// Missing or wrong PIN is not a non-matching credential, trying further candidates would only ask again
 					throw e;
+				} catch (final Fido2VerificationModeException e) {
+					// The requested mode is not possible with this token, the same applies to all further candidates
+					throw e;
 				} catch (final Fido2Exception e) {
 					// This credential does not belong to the token, try the next one
 					lastError = e;
@@ -429,6 +488,38 @@ public final class Fido2Utilities {
 	}
 
 	/**
+	 * Checks whether the hmac-secret can be retrieved with
+	 * {@link Fido2VerificationMode#USER_PRESENCE} (touch only, no PIN) from
+	 * the given token. Not possible via the Windows WebAuthn API
+	 * ({@link Fido2Token#isSystemApi()}), since Windows always enforces user
+	 * verification for the hmac-secret extension. Requires no user
+	 * interaction.
+	 *
+	 * @param token the token to check
+	 * @return true if user presence only is possible, false if only user
+	 *         verification is possible
+	 * @throws NullPointerException if token is null
+	 */
+	public static boolean isUserPresenceOnlySupported(final Fido2Token token) {
+		Objects.requireNonNull(token, "token");
+		return !token.isSystemApi();
+	}
+
+	/**
+	 * Checks whether the hmac-secret can be retrieved with
+	 * {@link Fido2VerificationMode#USER_PRESENCE} (touch only, no PIN) on this
+	 * system, without enumerating any token. Intended for presetting user
+	 * interfaces: false on Windows without administrator rights, where tokens
+	 * are only accessible via the Windows WebAuthn API. The definite check
+	 * for a concrete token is {@link #isUserPresenceOnlySupported(Fido2Token)}.
+	 *
+	 * @return false if user presence only is not possible on this system
+	 */
+	public static boolean isUserPresenceOnlyAvailable() {
+		return !(Fido2WindowsSupport.isWindows() && !Fido2WindowsSupport.isRunningAsAdministrator());
+	}
+
+	/**
 	 * Creates a random salt for the hmac-secret extension, using a
 	 * {@link SecureRandom}.
 	 *
@@ -438,6 +529,232 @@ public final class Fido2Utilities {
 		final byte[] salt = new byte[HMAC_SALT_LENGTH];
 		SECURE_RANDOM.nextBytes(salt);
 		return salt;
+	}
+
+	/**
+	 * Creates a random challenge for
+	 * {@link #authenticate(Fido2Token, String, List, byte[], Fido2Interaction, Fido2VerificationMode)},
+	 * using a {@link SecureRandom}. A challenge must be used only once.
+	 *
+	 * @return a new array of {@link #CHALLENGE_LENGTH} random bytes
+	 */
+	public static byte[] generateChallenge() {
+		final byte[] challenge = new byte[CHALLENGE_LENGTH];
+		SECURE_RANDOM.nextBytes(challenge);
+		return challenge;
+	}
+
+	/**
+	 * Creates a new signature credential (ECDSA P-256, without hmac-secret)
+	 * on the token, like a WebAuthn registration. Needs one touch (and the
+	 * PIN, if the token has one set or user verification is requested).
+	 *
+	 * Works via the Windows WebAuthn API with both verification modes.
+	 *
+	 * @param token the token to create the credential on
+	 * @param relyingPartyId application identifier, the same value must be
+	 *        used for authenticate() and verifyAssertion()
+	 * @param userName user name stored with the credential
+	 * @param interaction callbacks for PIN and touch prompts, may be null
+	 * @param verificationMode USER_PRESENCE or USER_VERIFICATION; only
+	 *        decides whether the PIN is required for the creation itself
+	 * @return the credential id and public key, to be stored by the caller
+	 * @throws NullPointerException if token, relyingPartyId, userName or
+	 *         verificationMode is null
+	 * @throws Fido2PinRequiredException if the PIN is needed but was not
+	 *         given, or was rejected
+	 * @throws Fido2VerificationModeException if user verification is
+	 *         requested for a token without PIN
+	 * @throws Fido2Exception on any other error
+	 */
+	public static Fido2Registration register(final Fido2Token token, final String relyingPartyId, final String userName, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
+		Objects.requireNonNull(token, "token");
+		Objects.requireNonNull(relyingPartyId, "relyingPartyId");
+		Objects.requireNonNull(userName, "userName");
+		Objects.requireNonNull(verificationMode, "verificationMode");
+
+		LOCK.lock();
+		try {
+			ensureLibraryAvailable();
+			final LibFido2.CreatedCredential createdCredential = LibFido2.createCredential(token.getId(), relyingPartyId, userName, nonNull(interaction), verificationMode, false);
+			return new Fido2Registration(createdCredential.credentialId(), encodeEs256PublicKey(createdCredential.rawPublicKey()));
+		} finally {
+			LOCK.unlock();
+		}
+	}
+
+	/**
+	 * Lets the token sign a challenge with one of the given credentials (no
+	 * hmac-secret), like a WebAuthn login. Needs one touch, with user
+	 * verification also the PIN. Unlike the hmac-secret, user presence only
+	 * also works via the Windows WebAuthn API.
+	 *
+	 * The result is not verified here, use
+	 * {@link #verifyAssertion(Fido2Assertion, byte[], String, byte[], Fido2VerificationMode)}
+	 * with the stored public key of the credential at
+	 * {@link Fido2Assertion#getCredentialIndex()}.
+	 *
+	 * @param token the connected token
+	 * @param relyingPartyId application identifier, the same value as used
+	 *        for register()
+	 * @param credentialIds the credential ids registered for the user, at
+	 *        least one; the token uses the one that belongs to it
+	 * @param challenge the challenge to be signed, at least
+	 *        {@link #MIN_CHALLENGE_LENGTH} bytes, see {@link #generateChallenge()}
+	 * @param interaction callbacks for PIN and touch prompts, may be null
+	 * @param verificationMode USER_PRESENCE (touch only) or
+	 *        USER_VERIFICATION (touch and PIN)
+	 * @return the assertion with the signature
+	 * @throws NullPointerException if token, relyingPartyId, challenge or
+	 *         verificationMode is null
+	 * @throws IllegalArgumentException if credentialIds is null, empty or
+	 *         contains a null or empty id, or the challenge is too short
+	 * @throws Fido2NoMatchingCredentialException if no credential belongs to the token
+	 * @throws Fido2PinRequiredException if the PIN is needed but was not
+	 *         given, or was rejected
+	 * @throws Fido2VerificationModeException if the requested mode is not
+	 *         possible with this token (user verification without PIN set, a
+	 *         token enforcing user verification), or the token did not report
+	 *         the requested user check
+	 * @throws Fido2Exception on any other error
+	 */
+	public static Fido2Assertion authenticate(final Fido2Token token, final String relyingPartyId, final List<byte[]> credentialIds, final byte[] challenge, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
+		Objects.requireNonNull(token, "token");
+		Objects.requireNonNull(relyingPartyId, "relyingPartyId");
+		Objects.requireNonNull(challenge, "challenge");
+		Objects.requireNonNull(verificationMode, "verificationMode");
+		if (credentialIds == null || credentialIds.isEmpty()) {
+			throw new IllegalArgumentException("No credential ids given");
+		}
+		final List<byte[]> checkedCredentialIds = new ArrayList<>(credentialIds.size());
+		for (final byte[] credentialId : credentialIds) {
+			if (credentialId == null || credentialId.length == 0) {
+				throw new IllegalArgumentException("Credential id is missing");
+			}
+			checkedCredentialIds.add(credentialId.clone());
+		}
+		if (challenge.length < MIN_CHALLENGE_LENGTH) {
+			throw new IllegalArgumentException("Challenge must be at least " + MIN_CHALLENGE_LENGTH + " bytes long");
+		}
+
+		LOCK.lock();
+		try {
+			ensureLibraryAvailable();
+			final LibFido2.SignedAssertion signedAssertion = LibFido2.getSignatureAssertion(token.getId(), relyingPartyId, checkedCredentialIds, challenge.clone(), nonNull(interaction), verificationMode);
+			return new Fido2Assertion(signedAssertion.credentialIndex(), signedAssertion.credentialId(), signedAssertion.clientData(), signedAssertion.authenticatorData(), signedAssertion.signature());
+		} finally {
+			LOCK.unlock();
+		}
+	}
+
+	/**
+	 * Verifies an assertion created by
+	 * {@link #authenticate(Fido2Token, String, List, byte[], Fido2Interaction, Fido2VerificationMode)}.
+	 * Pure Java (JDK), needs neither a token nor the native library, so it
+	 * also works on a server.
+	 *
+	 * Checks:
+	 * <ul>
+	 * <li>the relying party id hash in the authenticator data</li>
+	 * <li>the "user present" flag, and for USER_VERIFICATION also the "user
+	 * verified" flag</li>
+	 * <li>type "webauthn.get" and the expected challenge in the client data</li>
+	 * <li>the ECDSA P-256 signature over the authenticator data followed by
+	 * the SHA-256 hash of the client data</li>
+	 * </ul>
+	 * Not checked: the origin in the client data, and whether the signature
+	 * counter increased ({@link Fido2Assertion#getSignatureCounter()}, the
+	 * caller has to compare it with the last stored value if needed).
+	 *
+	 * @param assertion the assertion to verify
+	 * @param publicKey the stored public key of the used credential, as
+	 *        returned by {@link Fido2Registration#getPublicKey()}
+	 * @param relyingPartyId the relying party id used for registration
+	 * @param expectedChallenge the challenge given to authenticate()
+	 * @param requiredMode USER_PRESENCE (touch is sufficient, additional
+	 *        verification is accepted) or USER_VERIFICATION (verification
+	 *        required)
+	 * @return true if the assertion is valid, false otherwise (also for a
+	 *         malformed public key or client data)
+	 * @throws NullPointerException if a parameter is null
+	 */
+	public static boolean verifyAssertion(final Fido2Assertion assertion, final byte[] publicKey, final String relyingPartyId, final byte[] expectedChallenge, final Fido2VerificationMode requiredMode) {
+		Objects.requireNonNull(assertion, "assertion");
+		Objects.requireNonNull(publicKey, "publicKey");
+		Objects.requireNonNull(relyingPartyId, "relyingPartyId");
+		Objects.requireNonNull(expectedChallenge, "expectedChallenge");
+		Objects.requireNonNull(requiredMode, "requiredMode");
+
+		try {
+			final byte[] authenticatorData = assertion.getAuthenticatorData();
+			final byte[] clientData = assertion.getClientData();
+
+			final byte[] relyingPartyIdHash = MessageDigest.getInstance("SHA-256").digest(relyingPartyId.getBytes(StandardCharsets.UTF_8));
+			if (!MessageDigest.isEqual(relyingPartyIdHash, Arrays.copyOf(authenticatorData, relyingPartyIdHash.length))) {
+				return false;
+			}
+
+			if (!assertion.isUserPresent()) {
+				return false;
+			}
+			if (requiredMode == Fido2VerificationMode.USER_VERIFICATION && !assertion.isUserVerified()) {
+				return false;
+			}
+
+			final String clientDataJson = new String(clientData, StandardCharsets.UTF_8);
+			if (!CLIENT_DATA_TYPE_GET.equals(getJsonStringValue(clientDataJson, "type"))) {
+				return false;
+			}
+			final String expectedChallengeText = Base64.getUrlEncoder().withoutPadding().encodeToString(expectedChallenge);
+			final String challengeText = getJsonStringValue(clientDataJson, "challenge");
+			if (challengeText == null || !MessageDigest.isEqual(expectedChallengeText.getBytes(StandardCharsets.US_ASCII), challengeText.getBytes(StandardCharsets.US_ASCII))) {
+				return false;
+			}
+
+			final PublicKey key = KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(publicKey));
+			if (!(key instanceof final ECPublicKey ecPublicKey) || ecPublicKey.getParams().getCurve().getField().getFieldSize() != 256) {
+				return false;
+			}
+			final Signature verifier = Signature.getInstance("SHA256withECDSA");
+			verifier.initVerify(key);
+			verifier.update(authenticatorData);
+			verifier.update(MessageDigest.getInstance("SHA-256").digest(clientData));
+			return verifier.verify(assertion.getSignature());
+		} catch (@SuppressWarnings("unused") final GeneralSecurityException | IllegalArgumentException e) {
+			// Malformed key or signature: not valid
+			return false;
+		}
+	}
+
+	/**
+	 * Encodes a raw ES256 public key (x || y, 32 bytes each) as X.509
+	 * SubjectPublicKeyInfo (DER).
+	 *
+	 * @param rawPublicKey the 64 byte raw public key
+	 * @return the encoded public key
+	 * @throws Fido2Exception if the raw key does not have 64 bytes
+	 */
+	static byte[] encodeEs256PublicKey(final byte[] rawPublicKey) {
+		if (rawPublicKey == null || rawPublicKey.length != LibFido2.RAW_ES256_PUBLIC_KEY_LENGTH) {
+			throw new Fido2Exception("Invalid raw ES256 public key length: " + (rawPublicKey == null ? "null" : rawPublicKey.length));
+		}
+		final byte[] encoded = Arrays.copyOf(ES256_SUBJECT_PUBLIC_KEY_INFO_PREFIX, ES256_SUBJECT_PUBLIC_KEY_INFO_PREFIX.length + rawPublicKey.length);
+		System.arraycopy(rawPublicKey, 0, encoded, ES256_SUBJECT_PUBLIC_KEY_INFO_PREFIX.length, rawPublicKey.length);
+		return encoded;
+	}
+
+	/**
+	 * Returns the value of a top-level string member of a flat JSON object,
+	 * without unescaping (sufficient for the base64url challenge and the
+	 * type of WebAuthn client data, which contain no escape sequences).
+	 *
+	 * @param json the JSON text
+	 * @param name the member name
+	 * @return the raw string value, or null if the member is missing or not a string
+	 */
+	static String getJsonStringValue(final String json, final String name) {
+		final Matcher matcher = Pattern.compile("\"" + Pattern.quote(name) + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").matcher(json);
+		return matcher.find() ? matcher.group(1) : null;
 	}
 
 	/**

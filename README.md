@@ -31,6 +31,9 @@ byte[] secret = Fido2Utilities.getHmacSecret(token, "MyApp", credentialId, salt,
   API)
 - 📦 **Windows works out of the box**: the libfido2 DLLs are bundled and
   extracted automatically
+- ✍️ **Signatures like a WebAuthn login**: register a credential, let the
+  token sign a challenge and verify it in pure Java (also on a server
+  without token)
 - 👥 **Several tokens per secret**: give a list of candidate credentials and
   the library finds the one that belongs to the connected token
 - 👆 **Touch only or touch + PIN**: choose per call between user presence
@@ -157,14 +160,25 @@ byte[] secret = Fido2Utilities.getHmacSecret(token, "MyApp", credentialId, salt,
 
 Details:
 
-- `USER_PRESENCE`: no PIN is sent. Only if the token itself insists on a
-  PIN (e.g. tokens configured with "alwaysUv"), the PIN is requested as a
-  fallback. Creating a credential on a token with a PIN set usually needs the
-  PIN as well (CTAP 2.0 tokens demand it), retrieving the secret does not.
+- `USER_PRESENCE`: no PIN is ever sent for retrieving the secret. Creating
+  a credential on a token with a PIN set usually needs the PIN anyway (CTAP
+  2.0 tokens demand it), retrieving the secret does not.
+  **Not available on Windows without administrator rights**: the Windows
+  WebAuthn API always enforces user verification for the hmac-secret
+  extension (it even forces creating a PIN on tokens without one). Also not
+  available with tokens that enforce user verification themselves ("alwaysUv",
+  fingerprint tokens). Check with
+  `Fido2Utilities.isUserPresenceOnlySupported(token)` (or, without a token,
+  `Fido2Utilities.isUserPresenceOnlyAvailable()` for presetting a UI).
 - `USER_VERIFICATION`: the PIN is always requested through
   `Fido2Interaction.requestPin()` (on Windows without administrator rights the
-  Windows dialog asks for it). Tokens without a PIN set are rejected with a
-  `Fido2Exception`, set a PIN first (e.g. `fido2-token -S <device>`).
+  Windows dialog asks for it). With direct access, tokens without a PIN set
+  are rejected, set a PIN first (e.g. `fido2-token -S <device>`).
+- **The secret always matches the requested mode:** after every assertion the
+  user verification flag reported by the token is compared with the requested
+  mode. If they differ, or the mode is not possible with the token, a
+  `Fido2VerificationModeException` is thrown instead of returning a secret of
+  the wrong mode.
 - With several candidate credentials and `USER_VERIFICATION`, the matching
   credential is determined first with a touch only, so the PIN is requested
   just once.
@@ -188,6 +202,49 @@ byte[] secret = result.getSecret();
 There is also an overload with a `Fido2VerificationMode`. The mode applies
 to all candidates of the call.
 
+### Signatures (like a WebAuthn login)
+
+Besides the hmac-secret, a token can prove its presence by signing a
+challenge, exactly like a website login with a security key. No secret key
+is derived, so this is not suitable for encryption, but for authentication:
+
+```java
+// Once: register the token, store credential id and public key (neither is secret)
+Fido2Registration registration = Fido2Utilities.register(token, "MyApp", "alice", interaction,
+        Fido2VerificationMode.USER_PRESENCE);
+byte[] credentialId = registration.getCredentialId();
+byte[] publicKey = registration.getPublicKey();   // ECDSA P-256, X.509 SubjectPublicKeyInfo (DER)
+
+// Every login: a fresh random challenge, the token signs it
+byte[] challenge = Fido2Utilities.generateChallenge();
+Fido2Assertion assertion = Fido2Utilities.authenticate(token, "MyApp", List.of(credentialId), challenge,
+        interaction, Fido2VerificationMode.USER_PRESENCE);
+
+// Verification: pure Java, needs neither the token nor libfido2
+boolean valid = Fido2Utilities.verifyAssertion(assertion, publicKey, "MyApp", challenge,
+        Fido2VerificationMode.USER_PRESENCE);
+```
+
+- **Several registered tokens:** pass all credential ids of the user to
+  `authenticate()`, the token uses its own one.
+  `assertion.getCredentialIndex()` tells you which public key to verify with.
+- **Verification on another system:** transfer credential id, client data,
+  authenticator data and signature of the assertion and rebuild it there with
+  `new Fido2Assertion(credentialId, clientData, authenticatorData, signature)`.
+- **What `verifyAssertion()` checks:** the relying party id hash, the "user
+  present" flag (and "user verified" for `USER_VERIFICATION`), type and
+  challenge in the client data, and the ECDSA signature. Not checked: the
+  origin in the client data and the signature counter. To detect cloned
+  tokens, compare `assertion.getSignatureCounter()` with the last stored
+  value yourself (some tokens always report 0).
+- **Use every challenge only once**, otherwise a recorded assertion could be
+  replayed.
+- **Windows without administrator rights:** unlike the hmac-secret, both
+  modes work here. Windows honors user presence only for plain signatures,
+  like for website logins.
+- With `USER_PRESENCE`, an additional user verification by the token (e.g.
+  a fingerprint token) is accepted; with `USER_VERIFICATION` it is required.
+
 ## Error handling
 
 All exceptions are unchecked.
@@ -195,8 +252,9 @@ All exceptions are unchecked.
 | Exception | Meaning | Typical reaction |
 |---|---|---|
 | `Fido2PinRequiredException` | The token needs its PIN, and none was given or the given one was wrong (`isPinWasAlreadyAttempted()`) | Ask for the PIN (again) and retry |
+| `Fido2VerificationModeException` | The secret cannot be retrieved in the requested verification mode with this token (e.g. user presence on Windows without administrator rights, user verification on a token without PIN, or the token reported a different user verification state) | Use the other mode, or run with administrator rights |
 | `Fido2NoMatchingCredentialException` | The connected token does not hold the credential | "Please plug in the correct token" |
-| `Fido2Exception` | Any other problem: no token found, library missing, communication error, user verification requested for a token without PIN | Show the message |
+| `Fido2Exception` | Any other problem: no token found, library missing, communication error | Show the message |
 
 ## Operating system behaviour
 
@@ -209,10 +267,15 @@ explains what your users will see.
 | Touch prompt / PIN | Your `Fido2Interaction` | Your `Fido2Interaction` | Windows' own dialogs |
 | Token selection | First token found | First token found | Windows dialog |
 | User verification | PIN passed to the token | PIN passed to the token | Windows asks for the PIN |
+| hmac-secret, `USER_PRESENCE` (touch only) | ✅ | ✅ | ❌ (Windows enforces user verification) |
+| hmac-secret, `USER_VERIFICATION` (PIN) | ✅ | ✅ | ✅ |
+| Signatures, both modes | ✅ | ✅ | ✅ |
 
-Secrets are the same on all access paths, so data encrypted on Linux can be
-decrypted on Windows with the same token, as long as the same verification
-mode is used.
+In the same verification mode, secrets are the same on all access paths, so
+data protected with `USER_VERIFICATION` on Linux can be unlocked on Windows
+with the same token and vice versa. Data protected with `USER_PRESENCE` can
+only be unlocked with direct token access (Linux, macOS, Windows with
+administrator rights).
 
 ## Debug logging
 

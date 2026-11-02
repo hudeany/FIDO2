@@ -370,6 +370,24 @@ public interface Fido2Native extends Library {
 	 */
 	SizeT fido_cred_id_len(Pointer cred);
 
+	/**
+	 * Returns the public key of a created credential. For {@link #COSE_ES256}
+	 * these are the raw affine coordinates x and y of the P-256 point,
+	 * 32 bytes each (64 bytes in total).
+	 *
+	 * @param cred the created credential
+	 * @return pointer to the public key, only valid until the credential is freed
+	 */
+	Pointer fido_cred_pubkey_ptr(Pointer cred);
+
+	/**
+	 * Returns the length of the public key of a created credential.
+	 *
+	 * @param cred the created credential
+	 * @return length in bytes, 0 if there is none
+	 */
+	SizeT fido_cred_pubkey_len(Pointer cred);
+
 	// ---- Assertion (fido_assert_t) ----
 
 	/**
@@ -499,6 +517,69 @@ public interface Fido2Native extends Library {
 	 * @return length in bytes, 0 if there is none
 	 */
 	SizeT fido_assert_hmac_secret_len(Pointer assertPtr, SizeT idx);
+
+	/**
+	 * Returns the authenticator data flags of an assertion statement: bit
+	 * 0x01 = user present (UP), bit 0x04 = user verified (UV). C "uint8_t"
+	 * (1 byte), therefore declared as "byte".
+	 *
+	 * @param assertPtr the obtained assertion
+	 * @param idx 0-based statement index
+	 * @return the flags
+	 */
+	byte fido_assert_flags(Pointer assertPtr, SizeT idx);
+
+	/**
+	 * Returns the authenticator data of an assertion statement, CBOR-encoded
+	 * as a byte string (the raw authenticator data is the content of that
+	 * byte string, which is what the signature covers).
+	 *
+	 * @param assertPtr the obtained assertion
+	 * @param idx 0-based statement index
+	 * @return pointer to the CBOR-encoded data, only valid until the assertion is freed
+	 */
+	Pointer fido_assert_authdata_ptr(Pointer assertPtr, SizeT idx);
+
+	/**
+	 * Returns the length of the CBOR-encoded authenticator data of an
+	 * assertion statement.
+	 *
+	 * @param assertPtr the obtained assertion
+	 * @param idx 0-based statement index
+	 * @return length in bytes
+	 */
+	SizeT fido_assert_authdata_len(Pointer assertPtr, SizeT idx);
+
+	/**
+	 * Returns the signature of an assertion statement (for
+	 * {@link #COSE_ES256} an ASN.1 DER encoded ECDSA signature) over the
+	 * raw authenticator data followed by the client data hash.
+	 *
+	 * @param assertPtr the obtained assertion
+	 * @param idx 0-based statement index
+	 * @return pointer to the signature, only valid until the assertion is freed
+	 */
+	Pointer fido_assert_sig_ptr(Pointer assertPtr, SizeT idx);
+
+	/**
+	 * Returns the length of the signature of an assertion statement.
+	 *
+	 * @param assertPtr the obtained assertion
+	 * @param idx 0-based statement index
+	 * @return length in bytes
+	 */
+	SizeT fido_assert_sig_len(Pointer assertPtr, SizeT idx);
+
+	/**
+	 * Returns the signature counter of an assertion statement. C "uint32_t",
+	 * declared as "int": values above Integer.MAX_VALUE must be read with
+	 * Integer.toUnsignedLong().
+	 *
+	 * @param assertPtr the obtained assertion
+	 * @param idx 0-based statement index
+	 * @return the signature counter
+	 */
+	int fido_assert_sigcount(Pointer assertPtr, SizeT idx);
 
 	/**
 	 * Credential id used by assertion statement idx (the token picks one of

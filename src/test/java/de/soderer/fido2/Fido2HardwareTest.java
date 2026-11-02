@@ -66,4 +66,48 @@ public class Fido2HardwareTest {
 		assertThrows(Fido2NoMatchingCredentialException.class,
 				() -> Fido2Utilities.getHmacSecret(token, RELYING_PARTY_ID, foreignCredentialId, salt, interaction));
 	}
+
+	@Test
+	public void testSignatureRoundTrip() {
+		final Fido2Availability availability = Fido2Utilities.checkAvailability();
+		assertTrue(availability.isReady(), availability.toString());
+
+		final Fido2Token token = Fido2Utilities.findToken();
+		System.out.println("FIDO2 signature hardware test with token: " + token);
+		final Fido2Interaction interaction = Fido2Interaction.of(
+				() -> System.getProperty("fido2.pin"),
+				() -> System.out.println("Please touch the token ..."),
+				null,
+				null);
+
+		final Fido2Registration registration = Fido2Utilities.register(token, RELYING_PARTY_ID, "junit", interaction, Fido2VerificationMode.USER_PRESENCE);
+		assertTrue(registration.getCredentialId().length > 0);
+
+		// User presence only: also works via the Windows WebAuthn API, without PIN
+		final byte[] challenge = Fido2Utilities.generateChallenge();
+		final byte[] foreignCredentialId = Fido2Utilities.generateChallenge();
+		final Fido2Assertion assertion = Fido2Utilities.authenticate(token, RELYING_PARTY_ID, List.of(foreignCredentialId, registration.getCredentialId()), challenge, interaction,
+				Fido2VerificationMode.USER_PRESENCE);
+		assertEquals(1, assertion.getCredentialIndex());
+		assertArrayEquals(registration.getCredentialId(), assertion.getCredentialId());
+		assertTrue(assertion.isUserPresent());
+		assertTrue(Fido2Utilities.verifyAssertion(assertion, registration.getPublicKey(), RELYING_PARTY_ID, challenge, Fido2VerificationMode.USER_PRESENCE));
+
+		// The signature is bound to the challenge and relying party
+		assertFalse(Fido2Utilities.verifyAssertion(assertion, registration.getPublicKey(), RELYING_PARTY_ID, Fido2Utilities.generateChallenge(), Fido2VerificationMode.USER_PRESENCE));
+		assertFalse(Fido2Utilities.verifyAssertion(assertion, registration.getPublicKey(), "other.relying.party", challenge, Fido2VerificationMode.USER_PRESENCE));
+
+		// User verification, only if a PIN is given (Windows WebAuthn asks itself)
+		if (System.getProperty("fido2.pin") != null || token.isSystemApi()) {
+			final byte[] verifiedChallenge = Fido2Utilities.generateChallenge();
+			final Fido2Assertion verifiedAssertion = Fido2Utilities.authenticate(token, RELYING_PARTY_ID, List.of(registration.getCredentialId()), verifiedChallenge, interaction,
+					Fido2VerificationMode.USER_VERIFICATION);
+			assertTrue(verifiedAssertion.isUserVerified());
+			assertTrue(Fido2Utilities.verifyAssertion(verifiedAssertion, registration.getPublicKey(), RELYING_PARTY_ID, verifiedChallenge, Fido2VerificationMode.USER_VERIFICATION));
+		}
+
+		// A foreign credential alone does not match
+		assertThrows(Fido2NoMatchingCredentialException.class,
+				() -> Fido2Utilities.authenticate(token, RELYING_PARTY_ID, List.of(foreignCredentialId), Fido2Utilities.generateChallenge(), interaction, Fido2VerificationMode.USER_PRESENCE));
+	}
 }
