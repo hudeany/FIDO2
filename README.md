@@ -33,6 +33,9 @@ byte[] secret = Fido2Utilities.getHmacSecret(token, "MyApp", credentialId, salt,
   extracted automatically
 - 👥 **Several tokens per secret**: give a list of candidate credentials and
   the library finds the one that belongs to the connected token
+- 👆 **Touch only or touch + PIN**: choose per call between user presence
+  (touch is enough) and user verification (the token's PIN is always
+  required)
 - 🔐 **PIN on demand**: the PIN is only requested when the token actually
   needs it, with a dedicated exception for missing or wrong PINs
 - 🧵 **Thread-safe**: all token operations are serialized internally
@@ -126,6 +129,46 @@ try {
 
 The relying party id (`"MyApp"`) must be the same for creation and retrieval.
 
+### User presence or user verification
+
+Every token operation can be called with a `Fido2VerificationMode`:
+
+| Mode | The user has to … | Protects against |
+|---|---|---|
+| `USER_PRESENCE` (default) | touch the token | remote attacks, the token must be physically present |
+| `USER_VERIFICATION` | touch the token **and** enter its PIN | additionally someone who has stolen the token |
+
+The methods without a mode parameter use `USER_PRESENCE`. To use user
+verification, pass the mode to every call:
+
+```java
+byte[] credentialId = Fido2Utilities.createCredential(token, "MyApp", "alice", interaction,
+        Fido2VerificationMode.USER_VERIFICATION);
+byte[] salt = Fido2Utilities.generateSalt();
+
+byte[] secret = Fido2Utilities.getHmacSecret(token, "MyApp", credentialId, salt, interaction,
+        Fido2VerificationMode.USER_VERIFICATION);
+```
+
+> **Important:** the token derives a **different secret** in each mode for
+> the same credential and salt. Data protected in one mode can only be
+> unlocked in the same mode. Store the mode together with the credential id
+> and salt, and always use the stored mode for retrieval.
+
+Details:
+
+- `USER_PRESENCE`: no PIN is sent. Only if the token itself insists on a
+  PIN (e.g. tokens configured with "alwaysUv"), the PIN is requested as a
+  fallback. Creating a credential on a token with a PIN set usually needs the
+  PIN as well (CTAP 2.0 tokens demand it), retrieving the secret does not.
+- `USER_VERIFICATION`: the PIN is always requested through
+  `Fido2Interaction.requestPin()` (on Windows without administrator rights the
+  Windows dialog asks for it). Tokens without a PIN set are rejected with a
+  `Fido2Exception`, set a PIN first (e.g. `fido2-token -S <device>`).
+- With several candidate credentials and `USER_VERIFICATION`, the matching
+  credential is determined first with a touch only, so the PIN is requested
+  just once.
+
 ### Several tokens for the same data
 
 For data that several tokens can unlock (e.g. a primary key and a backup
@@ -142,6 +185,9 @@ int matchingIndex = result.getCredentialIndex();
 byte[] secret = result.getSecret();
 ```
 
+There is also an overload with a `Fido2VerificationMode`. The mode applies
+to all candidates of the call.
+
 ## Error handling
 
 All exceptions are unchecked.
@@ -150,7 +196,7 @@ All exceptions are unchecked.
 |---|---|---|
 | `Fido2PinRequiredException` | The token needs its PIN, and none was given or the given one was wrong (`isPinWasAlreadyAttempted()`) | Ask for the PIN (again) and retry |
 | `Fido2NoMatchingCredentialException` | The connected token does not hold the credential | "Please plug in the correct token" |
-| `Fido2Exception` | Any other problem: no token found, library missing, communication error | Show the message |
+| `Fido2Exception` | Any other problem: no token found, library missing, communication error, user verification requested for a token without PIN | Show the message |
 
 ## Operating system behaviour
 
@@ -162,9 +208,11 @@ explains what your users will see.
 | Token access | Direct (HID) | Direct (HID) | Windows WebAuthn API |
 | Touch prompt / PIN | Your `Fido2Interaction` | Your `Fido2Interaction` | Windows' own dialogs |
 | Token selection | First token found | First token found | Windows dialog |
+| User verification | PIN passed to the token | PIN passed to the token | Windows asks for the PIN |
 
 Secrets are the same on all access paths, so data encrypted on Linux can be
-decrypted on Windows with the same token.
+decrypted on Windows with the same token, as long as the same verification
+mode is used.
 
 ## Debug logging
 

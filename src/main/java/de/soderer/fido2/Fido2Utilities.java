@@ -18,12 +18,21 @@ import java.util.concurrent.locks.ReentrantLock;
  * own dialogs for selecting the key, touch and PIN), with administrator rights
  * they are accessed directly.</li>
  * <li>Windows WebAuthn API: no own touch prompts and PIN requests (the
- * Fido2Interaction callbacks are not called), no discoverable credentials, no
- * user verification (so the hmac-secret is the same as with direct access),
- * the matching credential of several candidates is determined in a single
- * step (otherwise Windows would show an error dialog per non-matching one).</li>
+ * Fido2Interaction callbacks are not called), no discoverable credentials,
+ * user verification set explicitly according to the
+ * {@link Fido2VerificationMode} (so the hmac-secret is the same as with
+ * direct access in the same mode), the matching credential of several
+ * candidates is determined in a single step (otherwise Windows would show an
+ * error dialog per non-matching one).</li>
  * <li>Linux/macOS: direct HID access via the system libfido2.</li>
  * </ul>
+ *
+ * Verification mode: with {@link Fido2VerificationMode#USER_PRESENCE}
+ * (default) touching the token is sufficient for retrieving the hmac-secret,
+ * with {@link Fido2VerificationMode#USER_VERIFICATION} the token's PIN is
+ * always required. The token derives different hmac-secrets in both modes, so
+ * the caller must store the mode with the credential and use the same mode
+ * for every later call.
  *
  * All token operations are serialized (libfido2 device handles are not
  * thread-safe), so they may be called from any thread. Token operations block
@@ -210,14 +219,42 @@ public final class Fido2Utilities {
 	 * @throws Fido2Exception on any other error
 	 */
 	public static byte[] createCredential(final Fido2Token token, final String relyingPartyId, final String userName, final Fido2Interaction interaction) {
+		return createCredential(token, relyingPartyId, userName, interaction, Fido2VerificationMode.USER_PRESENCE);
+	}
+
+	/**
+	 * Creates a new credential with the hmac-secret extension on the token.
+	 * Needs one touch, and the PIN if the token has one set or user
+	 * verification is requested.
+	 *
+	 * The verification mode only decides whether the PIN is required for
+	 * the creation itself. The credential supports both modes for
+	 * {@link #getHmacSecret(Fido2Token, String, byte[], byte[], Fido2Interaction, Fido2VerificationMode)}.
+	 *
+	 * @param token the token to create the credential on
+	 * @param relyingPartyId application identifier, the same value must be
+	 *        used for getHmacSecret()
+	 * @param userName user name stored with the credential
+	 * @param interaction callbacks for PIN and touch prompts, may be null
+	 * @param verificationMode USER_PRESENCE or USER_VERIFICATION
+	 * @return the credential id, to be stored by the caller
+	 * @throws NullPointerException if token, relyingPartyId, userName or
+	 *         verificationMode is null
+	 * @throws Fido2PinRequiredException if the PIN is needed but was not
+	 *         given, or was rejected
+	 * @throws Fido2Exception on any other error, e.g. user verification
+	 *         requested for a token without PIN
+	 */
+	public static byte[] createCredential(final Fido2Token token, final String relyingPartyId, final String userName, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
 		Objects.requireNonNull(token, "token");
 		Objects.requireNonNull(relyingPartyId, "relyingPartyId");
 		Objects.requireNonNull(userName, "userName");
+		Objects.requireNonNull(verificationMode, "verificationMode");
 
 		LOCK.lock();
 		try {
 			ensureLibraryAvailable();
-			return LibFido2.makeCredential(token.getId(), relyingPartyId, userName, nonNull(interaction));
+			return LibFido2.makeCredential(token.getId(), relyingPartyId, userName, nonNull(interaction), verificationMode);
 		} finally {
 			LOCK.unlock();
 		}
@@ -244,9 +281,37 @@ public final class Fido2Utilities {
 	 * @throws Fido2Exception on any other error
 	 */
 	public static byte[] getHmacSecret(final Fido2Token token, final String relyingPartyId, final byte[] credentialId, final byte[] salt, final Fido2Interaction interaction) {
+		return getHmacSecret(token, relyingPartyId, credentialId, salt, interaction, Fido2VerificationMode.USER_PRESENCE);
+	}
+
+	/**
+	 * Retrieves the hmac-secret of a credential for the given salt. The same
+	 * token, credential, salt and verification mode always give the same
+	 * secret. Needs one touch, with user verification also the PIN.
+	 *
+	 * @param token the token the credential was created on
+	 * @param relyingPartyId application identifier, the same value as used
+	 *        for {@link #createCredential(Fido2Token, String, String, Fido2Interaction, Fido2VerificationMode)}
+	 * @param credentialId credential id, as returned by
+	 *        {@link #createCredential(Fido2Token, String, String, Fido2Interaction, Fido2VerificationMode)}
+	 * @param salt {@link #HMAC_SALT_LENGTH} bytes, see {@link #generateSalt()}
+	 * @param interaction callbacks for PIN and touch prompts, may be null
+	 * @param verificationMode USER_PRESENCE or USER_VERIFICATION, must be
+	 *        the same as used for retrieving the secret the first time
+	 * @return the 32 byte hmac-secret
+	 * @throws NullPointerException if token, relyingPartyId or
+	 *         verificationMode is null
+	 * @throws IllegalArgumentException if the credential id is null or empty,
+	 *         or the salt does not have {@link #HMAC_SALT_LENGTH} bytes
+	 * @throws Fido2NoMatchingCredentialException if the credential does not belong to the token
+	 * @throws Fido2PinRequiredException if the PIN is needed but was not
+	 *         given, or was rejected
+	 * @throws Fido2Exception on any other error
+	 */
+	public static byte[] getHmacSecret(final Fido2Token token, final String relyingPartyId, final byte[] credentialId, final byte[] salt, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
 		final List<Fido2Credential> candidates = new ArrayList<>();
 		candidates.add(new Fido2Credential(credentialId, salt, null));
-		return getHmacSecret(token, relyingPartyId, candidates, interaction).getSecret();
+		return getHmacSecret(token, relyingPartyId, candidates, interaction, verificationMode).getSecret();
 	}
 
 	/**
@@ -275,8 +340,44 @@ public final class Fido2Utilities {
 	 * @throws Fido2Exception on any other error
 	 */
 	public static Fido2HmacSecret getHmacSecret(final Fido2Token token, final String relyingPartyId, final List<Fido2Credential> candidates, final Fido2Interaction interaction) {
+		return getHmacSecret(token, relyingPartyId, candidates, interaction, Fido2VerificationMode.USER_PRESENCE);
+	}
+
+	/**
+	 * Retrieves the hmac-secret for whichever of the candidate credentials
+	 * belongs to the token (e.g. a file encrypted for several tokens).
+	 *
+	 * The strategy depends on the operating system access path and the
+	 * verification mode: with the Windows WebAuthn API or with user
+	 * verification, the matching credential is determined first (one
+	 * additional touch, no PIN), since every non-matching attempt would show
+	 * a Windows error dialog or ask for the PIN again. Otherwise the
+	 * credentials are tried one by one.
+	 * {@link Fido2Interaction#onCredentialAttempt(int, int)} is called before
+	 * each attempt.
+	 *
+	 * @param token the connected token
+	 * @param relyingPartyId application identifier, the same value as used
+	 *        for {@link #createCredential(Fido2Token, String, String, Fido2Interaction, Fido2VerificationMode)}
+	 * @param candidates the candidate credentials (with their salts), at
+	 *        least one
+	 * @param interaction callbacks for PIN and touch prompts, may be null
+	 * @param verificationMode USER_PRESENCE or USER_VERIFICATION, used for
+	 *        all candidates; must be the same as used for retrieving the
+	 *        secret the first time
+	 * @return the hmac-secret and the index of the matching candidate
+	 * @throws NullPointerException if token, relyingPartyId or
+	 *         verificationMode is null
+	 * @throws IllegalArgumentException if candidates is null or empty
+	 * @throws Fido2NoMatchingCredentialException if no candidate belongs to the token
+	 * @throws Fido2PinRequiredException if the PIN is needed but was not
+	 *         given, or was rejected
+	 * @throws Fido2Exception on any other error
+	 */
+	public static Fido2HmacSecret getHmacSecret(final Fido2Token token, final String relyingPartyId, final List<Fido2Credential> candidates, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
 		Objects.requireNonNull(token, "token");
 		Objects.requireNonNull(relyingPartyId, "relyingPartyId");
+		Objects.requireNonNull(verificationMode, "verificationMode");
 		if (candidates == null || candidates.isEmpty()) {
 			throw new IllegalArgumentException("No candidate credentials given");
 		}
@@ -286,7 +387,10 @@ public final class Fido2Utilities {
 		try {
 			ensureLibraryAvailable();
 
-			if (token.isSystemApi() && candidates.size() > 1) {
+			// Windows WebAuthn: every non-matching attempt would show a Windows error dialog.
+			// User verification: every attempt would ask for the PIN again.
+			// So determine the matching credential first (user presence only, no PIN).
+			if (candidates.size() > 1 && (token.isSystemApi() || verificationMode == Fido2VerificationMode.USER_VERIFICATION)) {
 				final List<byte[]> credentialIds = new ArrayList<>();
 				for (final Fido2Credential candidate : candidates) {
 					credentialIds.add(candidate.getCredentialId());
@@ -294,7 +398,7 @@ public final class Fido2Utilities {
 				final int matchingIndex = LibFido2.findMatchingCredentialIndex(token.getId(), relyingPartyId, credentialIds, checkedInteraction);
 				final Fido2Credential candidate = candidates.get(matchingIndex);
 				checkedInteraction.onCredentialAttempt(matchingIndex + 1, candidates.size());
-				return new Fido2HmacSecret(matchingIndex, LibFido2.getHmacSecret(token.getId(), relyingPartyId, candidate.getCredentialId(), candidate.getSalt(), checkedInteraction, candidate.getTokenName()));
+				return new Fido2HmacSecret(matchingIndex, LibFido2.getHmacSecret(token.getId(), relyingPartyId, candidate.getCredentialId(), candidate.getSalt(), checkedInteraction, candidate.getTokenName(), verificationMode));
 			}
 
 			Fido2Exception lastError = null;
@@ -302,7 +406,7 @@ public final class Fido2Utilities {
 				final Fido2Credential candidate = candidates.get(i);
 				checkedInteraction.onCredentialAttempt(i + 1, candidates.size());
 				try {
-					return new Fido2HmacSecret(i, LibFido2.getHmacSecret(token.getId(), relyingPartyId, candidate.getCredentialId(), candidate.getSalt(), checkedInteraction, candidate.getTokenName()));
+					return new Fido2HmacSecret(i, LibFido2.getHmacSecret(token.getId(), relyingPartyId, candidate.getCredentialId(), candidate.getSalt(), checkedInteraction, candidate.getTokenName(), verificationMode));
 				} catch (final Fido2PinRequiredException e) {
 					// Missing or wrong PIN is not a non-matching credential, trying further candidates would only ask again
 					throw e;

@@ -236,7 +236,32 @@ final class LibFido2 {
 	 *         given by the interaction, or the given PIN was rejected
 	 */
 	static byte[] makeCredential(final String path, final String relyingPartyId, final String userName, final Fido2Interaction interaction) {
+		return makeCredential(path, relyingPartyId, userName, interaction, Fido2VerificationMode.USER_PRESENCE);
+	}
+
+	/**
+	 * Creates a new credential with the hmac-secret extension enabled
+	 * ("fido2-cred -M / -V" in the shell script).
+	 *
+	 * The verification mode only decides whether a PIN is asked for during
+	 * the creation. The credential itself supports both modes for later
+	 * hmac-secret assertions.
+	 *
+	 * @param path device path
+	 * @param relyingPartyId relying party id
+	 * @param userName user name stored with the credential
+	 * @param interaction callbacks for PIN and touch prompts, not null
+	 * @param verificationMode USER_PRESENCE or USER_VERIFICATION, not null
+	 * @return credential id
+	 * @throws Fido2PinRequiredException if a PIN is needed but none was
+	 *         given by the interaction, or the given PIN was rejected
+	 * @throws Fido2Exception if user verification is requested, but the
+	 *         token has no PIN set
+	 */
+	static byte[] makeCredential(final String path, final String relyingPartyId, final String userName, final Fido2Interaction interaction, final Fido2VerificationMode verificationMode) {
 		ensureInitialized();
+
+		final boolean userVerification = isUserVerification(verificationMode);
 
 		final Fido2Native fido = Fido2Native.INSTANCE;
 		final Pointer dev = fido.fido_dev_new();
@@ -271,13 +296,16 @@ final class LibFido2 {
 			// Windows WebAuthn: explicitly no discoverable credential, Windows would otherwise prefer
 			// to store it on the token, which needs one of its few storage slots for every encryption
 			checkResult(fido.fido_cred_set_rk(cred, windowsWebAuthn ? Fido2Native.FIDO_OPT_FALSE : Fido2Native.FIDO_OPT_OMIT), "fido_cred_set_rk");
-			// Windows WebAuthn: explicitly no user verification, otherwise Windows uses "preferred" and
-			// forces the user to set a PIN on tokens without one
-			checkResult(fido.fido_cred_set_uv(cred, windowsWebAuthn ? Fido2Native.FIDO_OPT_FALSE : Fido2Native.FIDO_OPT_OMIT), "fido_cred_set_uv");
+			// Windows WebAuthn: explicit user verification setting, otherwise Windows uses "preferred" and
+			// forces the user to set a PIN on tokens without one. Direct access: UV is done via the PIN.
+			checkResult(fido.fido_cred_set_uv(cred, getUvOption(windowsWebAuthn, userVerification)), "fido_cred_set_uv");
 
 			// Local capability check (no touch needed): with a PIN set, ask for it right away instead
 			// of a doomed first attempt without PIN. The Windows WebAuthn API asks for the PIN itself.
 			final boolean hasPin = !windowsWebAuthn && fido.fido_dev_has_pin(dev) != 0;
+			if (userVerification && !windowsWebAuthn && !hasPin) {
+				throw new Fido2Exception("User verification was requested, but the token has no PIN set. Please set a PIN on the token first.");
+			}
 
 			String pin = null;
 			if (hasPin) {
@@ -338,7 +366,37 @@ final class LibFido2 {
 	 *         given by the interaction, or the given PIN was rejected
 	 */
 	static byte[] getHmacSecret(final String path, final String relyingPartyId, final byte[] credentialId, final byte[] salt, final Fido2Interaction interaction, final String expectedTokenName) {
+		return getHmacSecret(path, relyingPartyId, credentialId, salt, interaction, expectedTokenName, Fido2VerificationMode.USER_PRESENCE);
+	}
+
+	/**
+	 * Retrieves the hmac-secret of an existing credential for the given salt
+	 * ("fido2-assert -G" in the shell script).
+	 *
+	 * The token derives different secrets with and without user
+	 * verification, so the same verification mode as for the original
+	 * encryption must be used.
+	 *
+	 * @param path device path
+	 * @param relyingPartyId relying party id used for the credential creation
+	 * @param credentialId credential id
+	 * @param salt salt for the hmac-secret extension
+	 * @param interaction callbacks for PIN and touch prompts, not null
+	 * @param expectedTokenName optional name of the token the credential was
+	 *        created on, only for the error message; may be null
+	 * @param verificationMode USER_PRESENCE (touch only, PIN only if the
+	 *        token enforces it) or USER_VERIFICATION (PIN always), not null
+	 * @return the 32 byte hmac-secret
+	 * @throws Fido2NoMatchingCredentialException if the credential does not belong to the token
+	 * @throws Fido2PinRequiredException if a PIN is needed but none was
+	 *         given by the interaction, or the given PIN was rejected
+	 * @throws Fido2Exception if user verification is requested, but the
+	 *         token has no PIN set
+	 */
+	static byte[] getHmacSecret(final String path, final String relyingPartyId, final byte[] credentialId, final byte[] salt, final Fido2Interaction interaction, final String expectedTokenName, final Fido2VerificationMode verificationMode) {
 		ensureInitialized();
+
+		final boolean userVerification = isUserVerification(verificationMode);
 
 		final Fido2Native fido = Fido2Native.INSTANCE;
 		final Pointer dev = fido.fido_dev_new();
@@ -370,17 +428,32 @@ final class LibFido2 {
 			checkResult(fido.fido_assert_set_extensions(assertPtr, Fido2Native.FIDO_EXT_HMAC_SECRET), "fido_assert_set_extensions");
 			checkResult(fido.fido_assert_set_hmac_salt(assertPtr, salt, new SizeT(salt.length)), "fido_assert_set_hmac_salt");
 			checkResult(fido.fido_assert_set_up(assertPtr, Fido2Native.FIDO_OPT_OMIT), "fido_assert_set_up");
-			// Windows WebAuthn: explicitly no user verification, otherwise Windows asks for the PIN ("preferred"), and the
-			// token then derives a different hmac-secret than with direct access without PIN (files would not be compatible)
-			checkResult(fido.fido_assert_set_uv(assertPtr, windowsWebAuthn ? Fido2Native.FIDO_OPT_FALSE : Fido2Native.FIDO_OPT_OMIT), "fido_assert_set_uv");
+			// Windows WebAuthn: explicit user verification setting, otherwise Windows asks for the PIN ("preferred"), and the
+			// token then derives a different hmac-secret than with direct access without PIN (files would not be compatible).
+			// Direct access: UV is done via the PIN (pinUvAuthParam), the "uv" option itself is omitted.
+			checkResult(fido.fido_assert_set_uv(assertPtr, getUvOption(windowsWebAuthn, userVerification)), "fido_assert_set_uv");
 
-			// Most tokens hand out the hmac-secret on touch only, so try without PIN first
-			returnCode = attemptGetAssert(fido, dev, assertPtr, null, interaction, windowsWebAuthn);
-			if (returnCode == Fido2Native.FIDO_ERR_PIN_REQUIRED) {
-				final String pin = requirePin(interaction, "Retrieving the HMAC secret requires the token's PIN.");
+			if (userVerification && !windowsWebAuthn) {
+				// User verification: the PIN is always needed, no attempt without it
+				if (fido.fido_dev_has_pin(dev) == 0) {
+					throw new Fido2Exception("User verification was requested, but the token has no PIN set. Please set a PIN on the token first.");
+				}
+				final String pin = requirePin(interaction, "Retrieving the HMAC secret with user verification requires the token's PIN.");
 				returnCode = attemptGetAssert(fido, dev, assertPtr, pin, interaction, windowsWebAuthn);
 				if (returnCode == Fido2Native.FIDO_ERR_PIN_REQUIRED || isPinInvalid(fido, returnCode)) {
 					throw new Fido2PinRequiredException("Retrieving the HMAC secret failed: the given PIN was rejected by the token.", true);
+				}
+			} else {
+				// User presence: most tokens hand out the hmac-secret on touch only, so try without PIN first.
+				// The Windows WebAuthn API shows its own dialog and asks for the PIN itself if needed.
+				returnCode = attemptGetAssert(fido, dev, assertPtr, null, interaction, windowsWebAuthn);
+				if (returnCode == Fido2Native.FIDO_ERR_PIN_REQUIRED) {
+					// Token enforces user verification (e.g. "alwaysUv"), so it never derives the secret without UV anyway
+					final String pin = requirePin(interaction, "Retrieving the HMAC secret requires the token's PIN.");
+					returnCode = attemptGetAssert(fido, dev, assertPtr, pin, interaction, windowsWebAuthn);
+					if (returnCode == Fido2Native.FIDO_ERR_PIN_REQUIRED || isPinInvalid(fido, returnCode)) {
+						throw new Fido2PinRequiredException("Retrieving the HMAC secret failed: the given PIN was rejected by the token.", true);
+					}
 				}
 			}
 
@@ -518,6 +591,28 @@ final class LibFido2 {
 			if (!windowsWebAuthn) {
 				interaction.onTouchCompleted();
 			}
+		}
+	}
+
+	private static boolean isUserVerification(final Fido2VerificationMode verificationMode) {
+		if (verificationMode == null) {
+			throw new IllegalArgumentException("Verification mode must not be null");
+		}
+		return verificationMode == Fido2VerificationMode.USER_VERIFICATION;
+	}
+
+	/**
+	 * Value for fido_cred_set_uv() / fido_assert_set_uv(). The Windows WebAuthn
+	 * API needs an explicit setting ("required" or "discouraged"). With direct
+	 * access the "uv" option is omitted: user verification is done via the PIN
+	 * (pinUvAuthParam), and tokens without built-in UV (fingerprint) reject an
+	 * explicit "uv" option.
+	 */
+	private static int getUvOption(final boolean windowsWebAuthn, final boolean userVerification) {
+		if (windowsWebAuthn) {
+			return userVerification ? Fido2Native.FIDO_OPT_TRUE : Fido2Native.FIDO_OPT_FALSE;
+		} else {
+			return Fido2Native.FIDO_OPT_OMIT;
 		}
 	}
 
